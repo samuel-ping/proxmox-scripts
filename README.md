@@ -20,15 +20,32 @@ Automates the setup required to mount a ZFS dataset into an unprivileged LXC con
 
 ### Usage
 
+**Interactive (curl):** run the script and answer the prompts:
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/samuel-ping/proxmox-scripts/main/setup-lxc-dataset.sh)"
 ```
-./setup-lxc-dataset.sh -c CTID -n DATASET -a APP [OPTIONS]
+
+**Non-interactive:** pass all args as flags (the `_` is a placeholder for `$0`):
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/samuel-ping/proxmox-scripts/main/setup-lxc-dataset.sh)" \
+  _ -c 101 -n docs -a paperless --dirs conf,data,media,database --docker
 ```
+
+**Direct:**
+
+```bash
+./setup-lxc-dataset.sh -c 101 -n docs -a paperless --dirs conf,data,media,database --docker
+```
+
+If any required flag is omitted, the script prompts for it. Each step also asks for confirmation before executing.
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `-c, --ctid` | LXC container ID | required |
-| `-n, --dataset` | Dataset name under pool (e.g. `docs` → `motherpool/docs`) | required |
-| `-a, --app` | App name — creates `APP-user` / `APP-users` in the LXC | required |
+| `-c, --ctid` | LXC container ID | prompted |
+| `-n, --dataset` | Dataset name under pool (e.g. `docs` → `motherpool/docs`) | prompted |
+| `-a, --app` | App name — creates `APP-user` / `APP-users` in the LXC | prompted |
 | `-p, --pool` | ZFS pool name | `motherpool` |
 | `-m, --mountpoint` | Mount point inside LXC | `/mnt/<dataset>` |
 | `--uid` | UID for the new LXC user | `1000` |
@@ -37,16 +54,6 @@ Automates the setup required to mount a ZFS dataset into an unprivileged LXC con
 | `--docker` | Add user to docker group in LXC | |
 | `--no-backup` | Disable backup for this mount point | |
 | `--dry-run` | Print all actions without executing them | |
-
-### Example
-
-```bash
-./setup-lxc-dataset.sh -c 101 -n docs -a paperless \
-  --dirs conf,data,media,database \
-  --docker
-```
-
-This creates `motherpool/docs`, mounts it at `/mnt/docs` in container 101, creates `paperless-user` / `paperless-users` (uid/gid 1000), makes the four subdirectories, and adds `paperless-user` to the docker group.
 
 ### Notes
 

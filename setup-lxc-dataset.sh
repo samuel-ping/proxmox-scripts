@@ -3,15 +3,14 @@
 # Automates ZFS dataset creation and LXC container configuration for Docker apps on Proxmox.
 # Run as root on the Proxmox host.
 #
-# What it does:
-#   1. Creates a ZFS dataset under your pool
-#   2. Adds a mountpoint to the LXC config
-#   3. Adds lxc.idmap lines so the LXC user can own the mounted dataset
-#   4. Updates /etc/subuid and /etc/subgid on the host
-#   5. Sets ownership of the dataset directory
-#   6. Starts the LXC and creates the user/group inside it
-#   7. Creates any requested subdirectories (as the new user)
-#   8. Optionally adds the user to the docker group
+# Usage (direct):
+#   ./setup-lxc-dataset.sh -c CTID -n DATASET -a APP [OPTIONS]
+#
+# Usage (curl):
+#   bash -c "$(curl -fsSL https://raw.githubusercontent.com/samuel-ping/proxmox-scripts/main/setup-lxc-dataset.sh)"
+#
+# To pass flags via curl, append them after a standalone --:
+#   bash -c "$(curl -fsSL <url>)" _ -c 101 -n docs -a paperless --docker
 
 set -euo pipefail
 
@@ -26,14 +25,13 @@ MOUNTPOINT=""
 DRY_RUN=false
 
 ### Colors
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; BOLD='\033[1m'; NC='\033[0m'
 
 info()  { echo -e "${GREEN}[INFO]${NC}  $*"; }
-step()  { echo -e "${BLUE}[STEP]${NC}  $*"; }
+step()  { echo -e "\n${BOLD}${BLUE}[STEP]${NC}${BOLD} $*${NC}"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 error() { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
 
-# run: executes a command, or just prints it in --dry-run mode
 run() {
     if $DRY_RUN; then
         echo -e "${YELLOW}[DRY]${NC}   $*"
@@ -42,7 +40,6 @@ run() {
     fi
 }
 
-# run_pct: runs a command inside the LXC via pct exec
 run_pct() {
     if $DRY_RUN; then
         echo -e "${YELLOW}[DRY]${NC}   pct exec ${CTID} -- $*"
@@ -51,12 +48,66 @@ run_pct() {
     fi
 }
 
+# confirm: print a y/N prompt and return 0 only if the user answers yes.
+# In dry-run mode, always proceeds (prints [DRY] instead).
+# Reads from /dev/tty so the prompt works when stdin is not a terminal
+# (e.g. when the script is run via bash -c "$(curl ...)").
+confirm() {
+    local msg="$1"
+    if $DRY_RUN; then
+        echo -e "${YELLOW}[DRY]${NC}   (would confirm: ${msg})"
+        return 0
+    fi
+    local response
+    echo -e -n "  ${YELLOW}?${NC} ${msg} [y/N]: " >/dev/tty
+    read -r response </dev/tty
+    [[ "${response,,}" =~ ^y(es)?$ ]]
+}
+
+# prompt_required: prompt for a value, loop until non-empty
+prompt_required() {
+    local msg="$1"
+    local val=""
+    while [[ -z "$val" ]]; do
+        echo -n "  ${msg}: " >/dev/tty
+        read -r val </dev/tty
+    done
+    echo "$val"
+}
+
+# prompt_default: prompt for a value, fall back to default on empty input
+prompt_default() {
+    local msg="$1" default="$2"
+    local val
+    echo -n "  ${msg} [${default}]: " >/dev/tty
+    read -r val </dev/tty
+    echo "${val:-$default}"
+}
+
+# prompt_bool: y/N prompt, echoes "true" or "false"
+prompt_bool() {
+    local msg="$1" default="${2:-false}"
+    local hint="y/N"
+    [[ "$default" == "true" ]] && hint="Y/n"
+    local val
+    echo -n "  ${msg} [${hint}]: " >/dev/tty
+    read -r val </dev/tty
+    if [[ -z "$val" ]]; then
+        echo "$default"
+    elif [[ "${val,,}" =~ ^y(es)?$ ]]; then
+        echo "true"
+    else
+        echo "false"
+    fi
+}
+
 usage() {
     cat <<EOF
 Usage: $(basename "$0") -c CTID -n DATASET -a APP [OPTIONS]
 
 Automates ZFS dataset creation and LXC container configuration for a Docker app.
-Must be run as root on the Proxmox host.
+Must be run as root on the Proxmox host. If required args are omitted, the script
+will prompt for them interactively.
 
 Required:
   -c, --ctid CTID        LXC container ID
@@ -76,6 +127,9 @@ Options:
 
 Example:
   $(basename "$0") -c 101 -n docs -a paperless --dirs conf,data,media,database --docker
+
+Curl usage:
+  bash -c "\$(curl -fsSL https://raw.githubusercontent.com/samuel-ping/proxmox-scripts/main/setup-lxc-dataset.sh)"
 EOF
     exit "${1:-0}"
 }
@@ -99,47 +153,94 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-### Validation
-[[ -z "${CTID:-}"         ]] && error "Missing required argument: -c/--ctid"
-[[ -z "${DATASET_NAME:-}" ]] && error "Missing required argument: -n/--dataset"
-[[ -z "${APP_NAME:-}"     ]] && error "Missing required argument: -a/--app"
-[[ $EUID -ne 0            ]] && error "This script must be run as root"
+### Root check before prompting
+[[ $EUID -ne 0 ]] && error "This script must be run as root"
+
+### Interactive prompts for any missing required args
+echo ""
+echo -e "${BOLD}ZFS Dataset → LXC Setup${NC}"
+echo "────────────────────────────────────────"
+
+if [[ -z "${CTID:-}" ]]; then
+    CTID=$(prompt_required "LXC container ID")
+fi
 [[ ! "$CTID" =~ ^[0-9]+$ ]] && error "CTID must be a number"
-[[ "$LXC_UID" -lt 1 || "$LXC_UID" -gt 65534 ]] && error "UID must be between 1 and 65534"
-[[ "$LXC_GID" -lt 1 || "$LXC_GID" -gt 65534 ]] && error "GID must be between 1 and 65534"
 
 CONF="/etc/pve/lxc/${CTID}.conf"
 [[ ! -f "$CONF" ]] && error "LXC config not found: ${CONF} — does container ${CTID} exist?"
 
+if [[ -z "${DATASET_NAME:-}" ]]; then
+    DATASET_NAME=$(prompt_required "Dataset name (e.g. docs)")
+fi
+
+if [[ -z "${APP_NAME:-}" ]]; then
+    APP_NAME=$(prompt_required "App name (e.g. paperless)")
+fi
+
+ZFS_POOL=$(prompt_default "ZFS pool" "$ZFS_POOL")
+
+_default_mp="/mnt/${DATASET_NAME}"
+if [[ -z "${MOUNTPOINT:-}" ]]; then
+    MOUNTPOINT=$(prompt_default "LXC mount point" "$_default_mp")
+fi
+
+LXC_UID=$(prompt_default "LXC user UID" "$LXC_UID")
+LXC_GID=$(prompt_default "LXC group GID" "$LXC_GID")
+
+[[ "$LXC_UID" -lt 1 || "$LXC_UID" -gt 65534 ]] && error "UID must be between 1 and 65534"
+[[ "$LXC_GID" -lt 1 || "$LXC_GID" -gt 65534 ]] && error "GID must be between 1 and 65534"
+
+if [[ ${#DIRS[@]} -eq 0 ]]; then
+    echo -n "  Subdirectories to create (comma-separated, or leave blank): "
+    read -r _dirs_input
+    if [[ -n "$_dirs_input" ]]; then
+        IFS=',' read -ra DIRS <<< "$_dirs_input"
+    fi
+fi
+
+if ! $ADD_DOCKER; then
+    ADD_DOCKER=$(prompt_bool "Add user to docker group in LXC?")
+fi
+
 ### Derived values
 DATASET_PATH="${ZFS_POOL}/${DATASET_NAME}"
-HOST_PATH="/${DATASET_PATH}"   # ZFS mounts datasets at /<dataset-path> by default
-LXC_MP="${MOUNTPOINT:-/mnt/${DATASET_NAME}}"
+HOST_PATH="/${DATASET_PATH}"
+LXC_MP="${MOUNTPOINT}"
 USERNAME="${APP_NAME}-user"
 GROUPNAME="${APP_NAME}-users"
 
+### Summary
 echo ""
+echo "────────────────────────────────────────"
+echo -e "${BOLD}Plan${NC}"
+echo "────────────────────────────────────────"
 echo "  Container:   ${CTID}  (${CONF})"
 echo "  ZFS dataset: ${DATASET_PATH}  →  ${HOST_PATH}"
 echo "  LXC mount:   ${LXC_MP}"
 echo "  User/Group:  ${USERNAME} / ${GROUPNAME}  (${LXC_UID}:${LXC_GID})"
 [[ ${#DIRS[@]} -gt 0 ]] && echo "  Directories: ${DIRS[*]}"
-$ADD_DOCKER && echo "  Docker:      yes"
-$DRY_RUN    && echo -e "  ${YELLOW}Mode: DRY RUN — no changes will be made${NC}"
+echo "  Docker:      ${ADD_DOCKER}"
+echo "  Backup:      ${BACKUP}"
+$DRY_RUN && echo -e "  ${YELLOW}Mode: DRY RUN — no changes will be made${NC}"
+echo "────────────────────────────────────────"
 echo ""
 
+confirm "Proceed with setup?" || { echo "Aborted."; exit 0; }
+
 # ────────────────────────────────────────────────────────────
-step "1/7  Creating ZFS dataset"
+step "1/7  Create ZFS dataset"
 if zfs list "${DATASET_PATH}" &>/dev/null; then
     warn "Dataset ${DATASET_PATH} already exists — skipping creation"
 else
+    confirm "Create ZFS dataset '${DATASET_PATH}'?" || error "Aborted at step 1"
     run zfs create "${DATASET_PATH}"
     info "Created ${DATASET_PATH}"
 fi
 
 # ────────────────────────────────────────────────────────────
-step "2/7  Stopping LXC ${CTID}"
+step "2/7  Stop LXC ${CTID}"
 if pct status "${CTID}" | grep -q "running"; then
+    confirm "Stop LXC ${CTID}?" || error "Aborted at step 2"
     run pct stop "${CTID}"
     info "Stopped"
 else
@@ -147,23 +248,24 @@ else
 fi
 
 # ────────────────────────────────────────────────────────────
-step "3/7  Adding mountpoint to LXC config"
+step "3/7  Add mountpoint to LXC config"
 if grep -q "mp=${LXC_MP}" "$CONF"; then
     warn "Mount point ${LXC_MP} already present in config — skipping"
 else
     mp_idx=0
     while grep -q "^mp${mp_idx}:" "$CONF"; do ((mp_idx++)); done
     mp_line="mp${mp_idx}: ${HOST_PATH},mp=${LXC_MP},backup=${BACKUP}"
-    info "Appending: ${mp_line}"
+    confirm "Append to ${CONF}:  ${mp_line}" || error "Aborted at step 3"
     run bash -c "echo '${mp_line}' >> '${CONF}'"
+    info "Mountpoint added"
 fi
 
 # ────────────────────────────────────────────────────────────
-step "4/7  Configuring UID/GID idmaps in LXC config"
-# We create a "hole" in the unprivileged container's idmap so that
-# LXC uid/gid NNNN maps directly to host uid/gid NNNN instead of
-# the default 100000+NNNN offset — this lets us chown the ZFS
-# dataset to NNNN on the host and have the LXC user own it too.
+step "4/7  Configure UID/GID idmaps in LXC config"
+# Creates a "hole" in the unprivileged container's idmap so that
+# LXC uid/gid N maps directly to host uid/gid N instead of the
+# default 100000+N offset — lets us chown the ZFS dataset to N
+# on the host and have the LXC user own it too.
 if grep -q "^lxc.idmap:" "$CONF"; then
     warn "idmap entries already present in ${CONF} — skipping"
     warn "If you need another uid/gid hole, edit ${CONF} manually"
@@ -180,8 +282,11 @@ else
     idmap_block+="\nlxc.idmap: g ${LXC_GID} ${LXC_GID} 1"
     [[ $gid_tail -gt 0 ]] && idmap_block+="\nlxc.idmap: g $((LXC_GID + 1)) $((100000 + LXC_GID + 1)) ${gid_tail}"
 
+    echo -e "  Will append to ${CONF}:${idmap_block}"
+    confirm "Add idmap lines to ${CONF}?" || error "Aborted at step 4"
+
     if $DRY_RUN; then
-        echo -e "${YELLOW}[DRY]${NC}   Appending to ${CONF}:${idmap_block}"
+        echo -e "${YELLOW}[DRY]${NC}   (skipped write)"
     else
         echo -e "${idmap_block}" >> "$CONF"
         info "idmap lines added"
@@ -189,35 +294,36 @@ else
 fi
 
 # ────────────────────────────────────────────────────────────
-step "5/7  Updating /etc/subuid and /etc/subgid"
+step "5/7  Update /etc/subuid and /etc/subgid"
 if grep -q "^root:${LXC_UID}:1$" /etc/subuid; then
     info "subuid entry already exists for ${LXC_UID}"
 else
-    info "Adding root:${LXC_UID}:1 to /etc/subuid"
+    confirm "Append 'root:${LXC_UID}:1' to /etc/subuid?" || error "Aborted at step 5"
     run bash -c "echo 'root:${LXC_UID}:1' >> /etc/subuid"
 fi
 
 if grep -q "^root:${LXC_GID}:1$" /etc/subgid; then
     info "subgid entry already exists for ${LXC_GID}"
 else
-    info "Adding root:${LXC_GID}:1 to /etc/subgid"
+    confirm "Append 'root:${LXC_GID}:1' to /etc/subgid?" || error "Aborted at step 5"
     run bash -c "echo 'root:${LXC_GID}:1' >> /etc/subgid"
 fi
 
 # ────────────────────────────────────────────────────────────
-step "6/7  Setting dataset ownership: ${HOST_PATH} → ${LXC_UID}:${LXC_GID}"
+step "6/7  Set dataset ownership"
+confirm "Run: chown ${LXC_UID}:${LXC_GID} ${HOST_PATH}?" || error "Aborted at step 6"
 run chown "${LXC_UID}:${LXC_GID}" "${HOST_PATH}"
+info "Ownership set"
 
 # ────────────────────────────────────────────────────────────
-step "7/7  Starting LXC and setting up user/group"
+step "7/7  Start LXC and configure user/group"
+confirm "Start LXC ${CTID} and set up user/group?" || error "Aborted at step 7"
 run pct start "${CTID}"
 
 if ! $DRY_RUN; then
     info "Waiting for container to become ready..."
     for i in {1..15}; do
-        if pct exec "${CTID}" -- true 2>/dev/null; then
-            break
-        fi
+        if pct exec "${CTID}" -- true 2>/dev/null; then break; fi
         sleep 4
         [[ $i -eq 15 ]] && error "Container did not become ready after 60s"
     done
@@ -249,7 +355,7 @@ if [[ ${#DIRS[@]} -gt 0 ]]; then
     done
 fi
 
-if $ADD_DOCKER; then
+if [[ "$ADD_DOCKER" == "true" ]]; then
     info "Adding ${USERNAME} to docker group"
     if ! $DRY_RUN && ! pct exec "${CTID}" -- getent group docker &>/dev/null; then
         warn "Docker group not found in LXC — is Docker installed? Skipping."
@@ -260,8 +366,9 @@ fi
 
 # ────────────────────────────────────────────────────────────
 echo ""
-echo -e "${GREEN}Done!${NC}"
-echo ""
+echo "────────────────────────────────────────"
+echo -e "${GREEN}${BOLD}Done!${NC}"
+echo "────────────────────────────────────────"
 echo "  ZFS dataset:  ${DATASET_PATH}"
 echo "  Host path:    ${HOST_PATH}"
 echo "  LXC mount:    ${LXC_MP}"
