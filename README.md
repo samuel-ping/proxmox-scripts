@@ -23,14 +23,14 @@ Automates the setup required to mount a ZFS dataset into an unprivileged LXC con
 **Interactive (curl):** run the script and answer the prompts:
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/samuel-ping/proxmox-scripts/main/setup-lxc-dataset.sh)"
+bash <(curl -fsSL https://raw.githubusercontent.com/samuel-ping/proxmox-scripts/main/setup-lxc-dataset.sh)
 ```
 
-**Non-interactive:** pass all args as flags (the `_` is a placeholder for `$0`):
+**Non-interactive (curl):** pass flags directly:
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/samuel-ping/proxmox-scripts/main/setup-lxc-dataset.sh)" \
-  _ -c 101 -n docs -a paperless --dirs conf,data,media,database --docker
+bash <(curl -fsSL https://raw.githubusercontent.com/samuel-ping/proxmox-scripts/main/setup-lxc-dataset.sh) \
+  -c 101 -n docs -a paperless --dirs conf,data,media,database --docker
 ```
 
 **Direct:**
@@ -39,12 +39,14 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/samuel-ping/proxmox-scri
 ./setup-lxc-dataset.sh -c 101 -n docs -a paperless --dirs conf,data,media,database --docker
 ```
 
+> **Note:** Use `bash <(curl ...)` (process substitution), not `bash -c "$(curl ...)"`. The latter disconnects stdin, causing interactive prompts to hang.
+
 If any required flag is omitted, the script prompts for it. Each step also asks for confirmation before executing.
 
 | Flag | Description | Default |
 |------|-------------|---------|
 | `-c, --ctid` | LXC container ID | prompted |
-| `-n, --dataset` | Dataset name under pool (e.g. `docs` → `motherpool/docs`) | prompted |
+| `-n, --dataset` | Dataset name under pool (e.g. `docs` → `motherpool/docs`; nested like `sping/docs` → `motherpool/sping/docs`) | prompted |
 | `-a, --app` | App name — creates `APP-user` / `APP-users` in the LXC | prompted |
 | `-p, --pool` | ZFS pool name | `motherpool` |
 | `-m, --mountpoint` | Mount point inside LXC | `/mnt/<dataset>` |

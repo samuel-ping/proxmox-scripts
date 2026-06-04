@@ -7,10 +7,10 @@
 #   ./setup-lxc-dataset.sh -c CTID -n DATASET -a APP [OPTIONS]
 #
 # Usage (curl):
-#   bash -c "$(curl -fsSL https://raw.githubusercontent.com/samuel-ping/proxmox-scripts/main/setup-lxc-dataset.sh)"
+#   bash <(curl -fsSL https://raw.githubusercontent.com/samuel-ping/proxmox-scripts/main/setup-lxc-dataset.sh)
 #
-# To pass flags via curl, append them after a standalone --:
-#   bash -c "$(curl -fsSL <url>)" _ -c 101 -n docs -a paperless --docker
+# To pass flags via curl:
+#   bash <(curl -fsSL <url>) -c 101 -n docs -a paperless --docker
 
 set -euo pipefail
 
@@ -111,7 +111,8 @@ will prompt for them interactively.
 
 Required:
   -c, --ctid CTID        LXC container ID
-  -n, --dataset NAME     Dataset name under pool (e.g. "docs" creates POOL/docs)
+  -n, --dataset NAME     Dataset name under pool (e.g. "docs" creates POOL/docs;
+                         "sping/docs" creates the nested POOL/sping/docs)
   -a, --app APP          App name — used to create APP-user / APP-users in the LXC
 
 Options:
@@ -174,12 +175,12 @@ if [[ -z "${DATASET_NAME:-}" ]]; then
 fi
 
 if [[ -z "${APP_NAME:-}" ]]; then
-    APP_NAME=$(prompt_required "App name (e.g. paperless)")
+    APP_NAME=$(prompt_required "App name — used to name the LXC user/group, e.g. paperless → paperless-user/paperless-users")
 fi
 
 ZFS_POOL=$(prompt_default "ZFS pool" "$ZFS_POOL")
 
-_default_mp="/mnt/${DATASET_NAME}"
+_default_mp="/mnt/$(basename "${DATASET_NAME}")"
 if [[ -z "${MOUNTPOINT:-}" ]]; then
     MOUNTPOINT=$(prompt_default "LXC mount point" "$_default_mp")
 fi
@@ -233,7 +234,7 @@ if zfs list "${DATASET_PATH}" &>/dev/null; then
     warn "Dataset ${DATASET_PATH} already exists — skipping creation"
 else
     confirm "Create ZFS dataset '${DATASET_PATH}'?" || error "Aborted at step 1"
-    run zfs create "${DATASET_PATH}"
+    run zfs create -p "${DATASET_PATH}"
     info "Created ${DATASET_PATH}"
 fi
 
