@@ -48,9 +48,9 @@ If any required flag is omitted, the script prompts for it. Each step also asks 
 | Flag | Description | Default |
 |------|-------------|---------|
 | `-c, --ctid` | LXC container ID | prompted |
-| `-n, --dataset` | Dataset name under pool (e.g. `docs` → `motherpool/docs`; nested like `sping/docs` → `motherpool/sping/docs`) | prompted |
+| `-n, --dataset` | Dataset name under the pool/parent (e.g. `docs` → `motherpool/sping/docs`; can nest further like `media/docs`) | prompted |
 | `-a, --app` | App name — creates `APP-user` / `APP-users` in the LXC | prompted |
-| `-p, --pool` | ZFS pool name | `motherpool` |
+| `-p, --pool` | ZFS pool, or pool/parent dataset | `motherpool/sping` |
 | `-m, --mountpoint` | Mount point inside LXC. With `--dirs`, the base each subdir mounts under; without, the full mount path | `/mnt` with `--dirs`, else `/mnt/<dataset>` |
 | `--uid` | UID for the new LXC user | `1000` |
 | `--gid` | GID for the new LXC group | `1000` |

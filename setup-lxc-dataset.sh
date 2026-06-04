@@ -15,7 +15,7 @@
 set -euo pipefail
 
 ### Defaults
-ZFS_POOL="motherpool"
+ZFS_POOL="motherpool/sping"
 LXC_UID=1000
 LXC_GID=1000
 ADD_DOCKER=false
@@ -111,12 +111,12 @@ will prompt for them interactively.
 
 Required:
   -c, --ctid CTID        LXC container ID
-  -n, --dataset NAME     Dataset name under pool (e.g. "docs" creates POOL/docs;
-                         "sping/docs" creates the nested POOL/sping/docs)
+  -n, --dataset NAME     Dataset name under the pool/parent (e.g. "docs" creates
+                         POOL/docs; can nest further, e.g. "media/docs")
   -a, --app APP          App name — used to create APP-user / APP-users in the LXC
 
 Options:
-  -p, --pool POOL        ZFS pool name (default: ${ZFS_POOL})
+  -p, --pool POOL        ZFS pool, or pool/parent dataset (default: ${ZFS_POOL})
   -m, --mountpoint PATH  Mount point inside LXC. With --dirs this is the base
                          directory each subdir mounts under (default: /mnt);
                          without --dirs it's the full mount path (default: /mnt/NAME)
@@ -183,7 +183,7 @@ if [[ -z "${APP_NAME:-}" ]]; then
     APP_NAME=$(prompt_required "App name — used to name the LXC user/group, e.g. paperless → paperless-user/paperless-users")
 fi
 
-ZFS_POOL=$(prompt_default "ZFS pool" "$ZFS_POOL")
+ZFS_POOL=$(prompt_default "ZFS pool (or pool/parent dataset)" "$ZFS_POOL")
 
 # Subdirectories: each becomes its own bind mount at <mount base>/<subdir> in the LXC.
 if [[ ${#DIRS[@]} -eq 0 ]]; then
