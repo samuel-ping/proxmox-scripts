@@ -117,17 +117,22 @@ Required:
 
 Options:
   -p, --pool POOL        ZFS pool name (default: ${ZFS_POOL})
-  -m, --mountpoint PATH  Mount point inside LXC (default: /mnt/NAME)
+  -m, --mountpoint PATH  Mount point inside LXC. With --dirs this is the base
+                         directory each subdir mounts under (default: /mnt);
+                         without --dirs it's the full mount path (default: /mnt/NAME)
       --uid UID          UID for the new LXC user (default: ${LXC_UID})
       --gid GID          GID for the new LXC group (default: ${LXC_GID})
-      --dirs DIR,...     Comma-separated subdirs to create under the mountpoint
+      --dirs DIR,...     Comma-separated subdirs; each becomes its own bind mount
+                         at <mountpoint>/<subdir> inside the LXC
       --docker           Add user to docker group in LXC
       --no-backup        Disable backup for this mount point
       --dry-run          Print actions without executing them
   -h, --help             Show this help and exit
 
 Example:
-  $(basename "$0") -c 101 -n docs -a paperless --dirs conf,data,media,database --docker
+  # mounts /mnt/paperless/{conf,data,media,database} in the LXC
+  $(basename "$0") -c 101 -n paperless -a paperless -m /mnt/paperless \\
+      --dirs conf,data,media,database --docker
 
 Curl usage:
   bash -c "\$(curl -fsSL https://raw.githubusercontent.com/samuel-ping/proxmox-scripts/main/setup-lxc-dataset.sh)"
@@ -180,24 +185,30 @@ fi
 
 ZFS_POOL=$(prompt_default "ZFS pool" "$ZFS_POOL")
 
-_default_mp="/mnt/$(basename "${DATASET_NAME}")"
-if [[ -z "${MOUNTPOINT:-}" ]]; then
-    MOUNTPOINT=$(prompt_default "LXC mount point" "$_default_mp")
+# Subdirectories: each becomes its own bind mount at <mount base>/<subdir> in the LXC.
+if [[ ${#DIRS[@]} -eq 0 ]]; then
+    echo -n "  Subdirectories to create, each its own bind mount (comma-separated, or leave blank): " >/dev/tty
+    read -r _dirs_input </dev/tty
+    if [[ -n "$_dirs_input" ]]; then
+        IFS=',' read -ra DIRS <<< "$_dirs_input"
+    fi
 fi
+
+if [[ -z "${MOUNTPOINT:-}" ]]; then
+    if [[ ${#DIRS[@]} -gt 0 ]]; then
+        # With subdirs, the mount point is a base dir; each subdir mounts at <base>/<subdir>.
+        MOUNTPOINT=$(prompt_default "LXC mount base directory (each subdir mounts under here)" "/mnt")
+    else
+        MOUNTPOINT=$(prompt_default "LXC mount point" "/mnt/$(basename "${DATASET_NAME}")")
+    fi
+fi
+MOUNTPOINT="${MOUNTPOINT%/}"   # strip any trailing slash
 
 LXC_UID=$(prompt_default "LXC user UID" "$LXC_UID")
 LXC_GID=$(prompt_default "LXC group GID" "$LXC_GID")
 
 [[ "$LXC_UID" -lt 1 || "$LXC_UID" -gt 65534 ]] && error "UID must be between 1 and 65534"
 [[ "$LXC_GID" -lt 1 || "$LXC_GID" -gt 65534 ]] && error "GID must be between 1 and 65534"
-
-if [[ ${#DIRS[@]} -eq 0 ]]; then
-    echo -n "  Subdirectories to create (comma-separated, or leave blank): "
-    read -r _dirs_input
-    if [[ -n "$_dirs_input" ]]; then
-        IFS=',' read -ra DIRS <<< "$_dirs_input"
-    fi
-fi
 
 if ! $ADD_DOCKER; then
     ADD_DOCKER=$(prompt_bool "Add user to docker group in LXC?")
@@ -206,9 +217,19 @@ fi
 ### Derived values
 DATASET_PATH="${ZFS_POOL}/${DATASET_NAME}"
 HOST_PATH="/${DATASET_PATH}"
-LXC_MP="${MOUNTPOINT}"
 USERNAME="${APP_NAME}-user"
 GROUPNAME="${APP_NAME}-users"
+
+# Build the list of bind mounts as "host_source|lxc_target" pairs. With subdirs,
+# each one is its own mount; otherwise the whole dataset is mounted once.
+MOUNTS=()
+if [[ ${#DIRS[@]} -gt 0 ]]; then
+    for dir in "${DIRS[@]}"; do
+        MOUNTS+=("${HOST_PATH}/${dir}|${MOUNTPOINT}/${dir}")
+    done
+else
+    MOUNTS+=("${HOST_PATH}|${MOUNTPOINT}")
+fi
 
 ### Summary
 echo ""
@@ -217,9 +238,11 @@ echo -e "${BOLD}Plan${NC}"
 echo "────────────────────────────────────────"
 echo "  Container:   ${CTID}  (${CONF})"
 echo "  ZFS dataset: ${DATASET_PATH}  →  ${HOST_PATH}"
-echo "  LXC mount:   ${LXC_MP}"
+echo "  Bind mounts:"
+for entry in "${MOUNTS[@]}"; do
+    echo "    ${entry%%|*}  →  ${entry##*|}"
+done
 echo "  User/Group:  ${USERNAME} / ${GROUPNAME}  (${LXC_UID}:${LXC_GID})"
-[[ ${#DIRS[@]} -gt 0 ]] && echo "  Directories: ${DIRS[*]}"
 echo "  Docker:      ${ADD_DOCKER}"
 echo "  Backup:      ${BACKUP}"
 $DRY_RUN && echo -e "  ${YELLOW}Mode: DRY RUN — no changes will be made${NC}"
@@ -238,6 +261,15 @@ else
     info "Created ${DATASET_PATH}"
 fi
 
+# Create the subdirectories on the host. A bind-mount source must exist before
+# the container starts, or the mount silently fails to attach.
+if [[ ${#DIRS[@]} -gt 0 ]]; then
+    for dir in "${DIRS[@]}"; do
+        run mkdir -p "${HOST_PATH}/${dir}"
+        info "Created host dir ${HOST_PATH}/${dir}"
+    done
+fi
+
 # ────────────────────────────────────────────────────────────
 step "2/7  Stop LXC ${CTID}"
 if pct status "${CTID}" | grep -q "running"; then
@@ -249,17 +281,23 @@ else
 fi
 
 # ────────────────────────────────────────────────────────────
-step "3/7  Add mountpoint to LXC config"
-if grep -q "mp=${LXC_MP}" "$CONF"; then
-    warn "Mount point ${LXC_MP} already present in config — skipping"
-else
+step "3/7  Add mountpoint(s) to LXC config"
+for entry in "${MOUNTS[@]}"; do
+    src="${entry%%|*}"
+    tgt="${entry##*|}"
+    if grep -qE "mp=${tgt}(,|\$)" "$CONF"; then
+        warn "Mount point ${tgt} already present in config — skipping"
+        continue
+    fi
     mp_idx=0
-    while grep -q "^mp${mp_idx}:" "$CONF"; do ((mp_idx++)); done
-    mp_line="mp${mp_idx}: ${HOST_PATH},mp=${LXC_MP},backup=${BACKUP}"
+    # Use $((...)) assignment, not ((mp_idx++)): the latter returns exit status 1
+    # when the pre-increment value is 0, which trips `set -e` on bash 4+.
+    while grep -q "^mp${mp_idx}:" "$CONF"; do mp_idx=$((mp_idx + 1)); done
+    mp_line="mp${mp_idx}: ${src},mp=${tgt},backup=${BACKUP}"
     confirm "Append to ${CONF}:  ${mp_line}" || error "Aborted at step 3"
     run bash -c "echo '${mp_line}' >> '${CONF}'"
-    info "Mountpoint added"
-fi
+    info "Mountpoint added: ${src} → ${tgt}"
+done
 
 # ────────────────────────────────────────────────────────────
 step "4/7  Configure UID/GID idmaps in LXC config"
@@ -312,8 +350,8 @@ fi
 
 # ────────────────────────────────────────────────────────────
 step "6/7  Set dataset ownership"
-confirm "Run: chown ${LXC_UID}:${LXC_GID} ${HOST_PATH}?" || error "Aborted at step 6"
-run chown "${LXC_UID}:${LXC_GID}" "${HOST_PATH}"
+confirm "Run: chown -R ${LXC_UID}:${LXC_GID} ${HOST_PATH}?" || error "Aborted at step 6"
+run chown -R "${LXC_UID}:${LXC_GID}" "${HOST_PATH}"
 info "Ownership set"
 
 # ────────────────────────────────────────────────────────────
@@ -348,14 +386,6 @@ else
         --shell /bin/bash
 fi
 
-if [[ ${#DIRS[@]} -gt 0 ]]; then
-    info "Creating subdirectories under ${LXC_MP}"
-    for dir in "${DIRS[@]}"; do
-        info "  mkdir ${LXC_MP}/${dir}"
-        run_pct sudo -u "${USERNAME}" mkdir -p "${LXC_MP}/${dir}"
-    done
-fi
-
 if [[ "$ADD_DOCKER" == "true" ]]; then
     info "Adding ${USERNAME} to docker group"
     if ! $DRY_RUN && ! pct exec "${CTID}" -- getent group docker &>/dev/null; then
@@ -372,8 +402,10 @@ echo -e "${GREEN}${BOLD}Done!${NC}"
 echo "────────────────────────────────────────"
 echo "  ZFS dataset:  ${DATASET_PATH}"
 echo "  Host path:    ${HOST_PATH}"
-echo "  LXC mount:    ${LXC_MP}"
+echo "  Bind mounts:"
+for entry in "${MOUNTS[@]}"; do
+    echo "    ${entry%%|*}  →  ${entry##*|}"
+done
 echo "  User/Group:   ${USERNAME} / ${GROUPNAME} (${LXC_UID}:${LXC_GID})"
-[[ ${#DIRS[@]} -gt 0 ]] && echo "  Directories:  ${DIRS[*]}"
 echo ""
-echo "Verify with: pct exec ${CTID} -- ls -la ${LXC_MP}"
+echo "Verify with: pct exec ${CTID} -- ls -la ${MOUNTPOINT}"

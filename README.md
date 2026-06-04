@@ -9,13 +9,13 @@ Utility scripts for menial Proxmox tasks that I do frequently.
 Automates the setup required to mount a ZFS dataset into an unprivileged LXC container with correct ownership. Run on the Proxmox host as root.
 
 **What it does:**
-1. Creates a ZFS dataset under your pool
-2. Adds a mountpoint entry to the LXC config
-3. Adds `lxc.idmap` lines to pass a UID/GID through to the host (so the LXC user can own the dataset)
-4. Updates `/etc/subuid` and `/etc/subgid`
-5. Sets ownership of the dataset directory on the host
-6. Starts the LXC and creates the user/group inside it
-7. Creates any requested subdirectories (as the new user)
+1. Creates a ZFS dataset under your pool (nested paths supported, e.g. `sping/docs`)
+2. Creates any requested subdirectories on the host under the dataset
+3. Adds mountpoint entries to the LXC config — one bind mount per subdir (or a single mount of the whole dataset if no subdirs are given)
+4. Adds `lxc.idmap` lines to pass a UID/GID through to the host (so the LXC user can own the dataset)
+5. Updates `/etc/subuid` and `/etc/subgid`
+6. Sets ownership of the dataset (recursively) on the host
+7. Starts the LXC and creates the user/group inside it
 8. Optionally adds the user to the docker group
 
 ### Usage
@@ -29,14 +29,16 @@ bash <(curl -fsSL https://raw.githubusercontent.com/samuel-ping/proxmox-scripts/
 **Non-interactive (curl):** pass flags directly:
 
 ```bash
+# mounts /mnt/paperless/{conf,data,media,database} in the LXC
 bash <(curl -fsSL https://raw.githubusercontent.com/samuel-ping/proxmox-scripts/main/setup-lxc-dataset.sh) \
-  -c 101 -n docs -a paperless --dirs conf,data,media,database --docker
+  -c 101 -n paperless -a paperless -m /mnt/paperless --dirs conf,data,media,database --docker
 ```
 
 **Direct:**
 
 ```bash
-./setup-lxc-dataset.sh -c 101 -n docs -a paperless --dirs conf,data,media,database --docker
+./setup-lxc-dataset.sh -c 101 -n paperless -a paperless -m /mnt/paperless \
+  --dirs conf,data,media,database --docker
 ```
 
 > **Note:** Use `bash <(curl ...)` (process substitution), not `bash -c "$(curl ...)"`. The latter disconnects stdin, causing interactive prompts to hang.
@@ -49,10 +51,10 @@ If any required flag is omitted, the script prompts for it. Each step also asks 
 | `-n, --dataset` | Dataset name under pool (e.g. `docs` → `motherpool/docs`; nested like `sping/docs` → `motherpool/sping/docs`) | prompted |
 | `-a, --app` | App name — creates `APP-user` / `APP-users` in the LXC | prompted |
 | `-p, --pool` | ZFS pool name | `motherpool` |
-| `-m, --mountpoint` | Mount point inside LXC | `/mnt/<dataset>` |
+| `-m, --mountpoint` | Mount point inside LXC. With `--dirs`, the base each subdir mounts under; without, the full mount path | `/mnt` with `--dirs`, else `/mnt/<dataset>` |
 | `--uid` | UID for the new LXC user | `1000` |
 | `--gid` | GID for the new LXC group | `1000` |
-| `--dirs` | Comma-separated subdirs to create under the mountpoint | |
+| `--dirs` | Comma-separated subdirs; each becomes its own bind mount at `<mountpoint>/<subdir>` (e.g. `audiobooks,podcasts` → `/mnt/audiobooks`, `/mnt/podcasts`) | |
 | `--docker` | Add user to docker group in LXC | |
 | `--no-backup` | Disable backup for this mount point | |
 | `--dry-run` | Print all actions without executing them | |
